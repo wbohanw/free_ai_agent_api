@@ -1,0 +1,19 @@
+{
+  "name": "openrouter-automation",
+  "version": "1.0.0",
+  "description": "Automation script for OpenRouter chat interaction",
+  "main": "openrouter-automation.js",
+  "scripts": {
+    "start": "node openrouter-automation.js",
+    "headless": "node openrouter-automation-headless.js",
+    "with-response": "node openrouter-automation-with-response.js",
+    "visible": "node openrouter-automation.js",
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  },
+  "keywords": ["automation", "openrouter", "chat"],
+  "author": "",
+  "license": "MIT"
+} 
