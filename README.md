@@ -1,4 +1,4 @@
-# OpenRouter AI Chat Automation
+# FREE AI API SERVER
 
 Hacked OpenRouter API services via a REST API.
 For learning and development ONLY
