@@ -28,9 +28,6 @@ class OpenRouterAutoLogin {
         this.browser = null;
         this.page = null;
         this.isReady = false;
-        this.pendingResponses = new Map();
-        this.responseCallbacks = new Map();
-        this.lastResponseId = 0;
     }
 
     // Check if user is logged in by looking for avatar
@@ -43,6 +40,7 @@ class OpenRouterAutoLogin {
                 return !!(avatarPicture && avatarImg);
             });
         } catch (error) {
+            console.log('⚠️ Error checking login status:', error.message);
             return false;
         }
     }
@@ -55,12 +53,13 @@ class OpenRouterAutoLogin {
                 timestamp: new Date().toISOString(),
                 url: await this.page.url(),
                 cookies: cookies,
-                userAgent: await this.page.evaluate(() => navigator.userAgent)
             };
             
             await fs.writeFile(CONFIG.cookiesFile, JSON.stringify(sessionData, null, 2));
+            console.log('💾 Session saved');
             return true;
         } catch (error) {
+            console.log('⚠️ Failed to save session:', error.message);
             return false;
         }
     }
@@ -76,179 +75,179 @@ class OpenRouterAutoLogin {
             }
 
             await this.page.setCookie(...data.cookies);
+            console.log('🔑 Session restored');
             return true;
         } catch (error) {
+            console.log('ℹ️ No existing session found');
             return false;
         }
     }
 
-    // Initialize browser with persistent session
+    // Initialize browser with better error handling
     async initBrowser() {
         try {
-            await fs.mkdir(CONFIG.userDataDir, { recursive: true });
+            console.log('🌐 Launching browser...');
+            
+            // Create user data directory
+            try {
+                await fs.mkdir(CONFIG.userDataDir, { recursive: true });
+            } catch (error) {
+                // Directory might already exist, ignore
+            }
+
+            this.browser = await puppeteer.launch({
+                headless: CONFIG.headless,
+                userDataDir: CONFIG.userDataDir,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-features=VizDisplayCompositor'
+                ],
+                timeout: 30000 // Add timeout for browser launch
+            });
+
+            this.page = await this.browser.newPage();
+            await this.page.setViewport({ width: 1280, height: 720 });
+            
+            console.log('✅ Browser launched successfully');
+            return true;
+            
         } catch (error) {
-            // Directory might already exist
+            console.error('❌ Failed to launch browser:', error.message);
+            throw error;
         }
-
-        this.browser = await puppeteer.launch({
-            headless: CONFIG.headless,
-            userDataDir: CONFIG.userDataDir,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=VizDisplayCompositor'
-            ]
-        });
-
-        this.page = await this.browser.newPage();
     }
 
-    // Wait for manual login and detect success
-    async waitForLogin() {
+    // Wait for manual login with timeout
+    async waitForLogin(timeoutMs = 300000) { // 5 minute timeout
         console.log('🔐 Login required - please log in manually in the browser');
         
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
+            const startTime = Date.now();
+            
             const checkLogin = async () => {
-                const loggedIn = await this.isLoggedIn();
-                if (loggedIn) {
-                    console.log('✅ Login successful!');
-                    resolve(true);
-                } else {
+                try {
+                    // Check timeout
+                    if (Date.now() - startTime > timeoutMs) {
+                        reject(new Error('Login timeout - please try again'));
+                        return;
+                    }
+                    
+                    const loggedIn = await this.isLoggedIn();
+                    if (loggedIn) {
+                        console.log('✅ Login successful!');
+                        resolve(true);
+                    } else {
+                        setTimeout(checkLogin, 2000);
+                    }
+                } catch (error) {
+                    console.log('⚠️ Error during login check:', error.message);
                     setTimeout(checkLogin, 2000);
                 }
             };
+            
             checkLogin();
         });
     }
 
-    // Enhanced monitoring with better response capture
-    async startMonitoring() {
-        await this.page.evaluate(() => {
-            let messageCount = 0;
-            
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((mutation) => {
-                    if (mutation.type === 'childList') {
-                        mutation.addedNodes.forEach((node) => {
-                            if (node.nodeType === Node.ELEMENT_NODE) {
-                                const classes = node.className || '';
-                                const text = node.textContent || '';
-                                
-                                // Detect AI responses more broadly
-                                if (classes.includes('max-w-3xl') || 
-                                    classes.includes('prose') ||
-                                    (node.tagName === 'P' && text.length > 20)) {
-                                    
-                                    if (text.trim().length > 10) {
-                                        console.log('🔄 New content detected:', text.substring(0, 50) + '...');
-                                        
-                                        // Update the global response tracker
-                                        window.lastAIResponse = {
-                                            text: text.trim(),
-                                            timestamp: Date.now(),
-                                            messageCount: ++messageCount
-                                        };
-                                    }
-                                }
-                            }
-                        });
-                    }
-                });
-            });
-
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                attributes: false
-            });
-            
-            // Initialize response tracking
-            window.lastAIResponse = null;
-            console.log('👀 Enhanced monitoring started');
-        });
-    }
-
-    // Post-login actions: Click "Add model" button and select configured model
+    // Post-login actions with better error handling
     async performPostLoginActions() {
         try {
+            console.log('🔧 Setting up model selection...');
             await new Promise(resolve => setTimeout(resolve, 3000));
             
-            let addModelButton = null;
+            // Try to find and click "Add model" button
+            const addModelClicked = await this.clickAddModelButton();
             
+            if (addModelClicked) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                await this.selectModel();
+            } else {
+                console.log('⚠️ Model selection skipped - button not found');
+            }
+            
+        } catch (error) {
+            console.log('⚠️ Post-login actions failed:', error.message);
+        }
+    }
+
+    // Helper method to click "Add model" button
+    async clickAddModelButton() {
+        try {
+            // Method 1: XPath
             try {
                 const xpath = "//button[contains(., 'Add model')]";
                 await this.page.waitForXPath(xpath, { timeout: 5000 });
                 const elements = await this.page.$x(xpath);
                 if (elements.length > 0) {
-                    addModelButton = elements[0];
+                    await elements[0].click();
+                    return true;
                 }
             } catch (e) {
-                addModelButton = await this.page.evaluateHandle(() => {
-                    const buttons = document.querySelectorAll('button');
-                    for (const button of buttons) {
-                        if (button.textContent && button.textContent.includes('Add model')) {
-                            return button;
-                        }
-                    }
-                    return null;
-                });
-                
-                if (!addModelButton || !(await addModelButton.asElement())) {
-                    addModelButton = null;
-                }
+                // Continue to method 2
             }
             
-            if (addModelButton && await addModelButton.asElement()) {
-                await addModelButton.asElement().click();
-                await new Promise(resolve => setTimeout(resolve, 3000));
-                
-                let modelOption = null;
-                
-                try {
-                    await this.page.waitForSelector('[cmdk-item]', { timeout: 5000 });
-                } catch (e) {
-                    // Continue anyway
-                }
-                
-                modelOption = await this.page.evaluateHandle((selectedModel) => {
-                    const options = document.querySelectorAll('[cmdk-item], [role="option"], .option');
-                    for (const option of options) {
-                        const text = option.textContent || '';
-                        if (text.includes(selectedModel)) {
-                            return option;
-                        }
-                    }
-                    return null;
-                }, CONFIG.selectedModel);
-                
-                if (modelOption && await modelOption.asElement()) {
-                    await modelOption.asElement().click();
-                    console.log(`✅ Model selected: ${CONFIG.selectedModel}`);
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                } else {
-                    console.log(`❌ Model selection required - "${CONFIG.selectedModel}" not found`);
-                    
-                    const availableModels = await this.page.evaluate(() => {
-                        const options = document.querySelectorAll('[cmdk-item], [role="option"]');
-                        return Array.from(options).map(opt => opt.textContent?.trim()).filter(Boolean).slice(0, 10);
-                    });
-                    
-                    if (availableModels.length > 0) {
-                        console.log('Available models:', availableModels.join(', '));
+            // Method 2: Evaluate and find button
+            const buttonFound = await this.page.evaluate(() => {
+                const buttons = document.querySelectorAll('button');
+                for (const button of buttons) {
+                    if (button.textContent && button.textContent.includes('Add model')) {
+                        button.click();
+                        return true;
                     }
                 }
-                
-            } else {
-                console.log('❌ Model selection required - "Add model" button not found');
-            }
+                return false;
+            });
+            
+            return buttonFound;
             
         } catch (error) {
-            console.log('❌ Model selection failed');
+            console.log('⚠️ Could not find Add model button:', error.message);
+            return false;
         }
     }
 
-    // Send message via API - IMPROVED VERSION
+    // Helper method to select model
+    async selectModel() {
+        try {
+            // Wait for model options to appear
+            try {
+                await this.page.waitForSelector('[cmdk-item]', { timeout: 5000 });
+            } catch (e) {
+                console.log('⚠️ Model selector not found');
+                return false;
+            }
+            
+            // Try to find and click the selected model
+            const modelSelected = await this.page.evaluate((selectedModel) => {
+                const options = document.querySelectorAll('[cmdk-item], [role="option"], .option');
+                for (const option of options) {
+                    const text = option.textContent || '';
+                    if (text.includes(selectedModel)) {
+                        option.click();
+                        return true;
+                    }
+                }
+                return false;
+            }, CONFIG.selectedModel);
+            
+            if (modelSelected) {
+                console.log(`✅ Model selected: ${CONFIG.selectedModel}`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return true;
+            } else {
+                console.log(`❌ Model "${CONFIG.selectedModel}" not found`);
+                return false;
+            }
+            
+        } catch (error) {
+            console.log('⚠️ Model selection failed:', error.message);
+            return false;
+        }
+    }
+
+    // Send message with improved error handling
     async sendMessage(message) {
         try {
             if (!this.isReady) {
@@ -257,44 +256,16 @@ class OpenRouterAutoLogin {
             
             console.log(`📤 Sending message: "${message}"`);
             
-            // Get initial message count before sending
-            const initialMessageCount = await this.page.evaluate(() => {
-                window.lastAIResponse = null;
-                const messages = document.querySelectorAll('.max-w-3xl');
-                return messages.length;
-            });
-            
-            // Find and use chat input
-            let chatInput = await this.page.$('textarea[name="Chat Input"]');
-            
+            // Find chat input
+            const chatInput = await this.findChatInput();
             if (!chatInput) {
-                chatInput = await this.page.$('textarea[placeholder*="Start a message"]');
+                throw new Error('Chat input not found');
             }
             
-            if (!chatInput) {
-                chatInput = await this.page.evaluateHandle(() => {
-                    const textareas = document.querySelectorAll('textarea');
-                    for (const textarea of textareas) {
-                        if (textarea.placeholder && 
-                            (textarea.placeholder.includes('message') || 
-                             textarea.placeholder.includes('chat') ||
-                             textarea.name === 'Chat Input')) {
-                            return textarea;
-                        }
-                    }
-                    return null;
-                });
-                
-                if (!chatInput || !(await chatInput.asElement())) {
-                    throw new Error('Chat input not found');
-                }
-            }
-            
-            // Clear existing text and type new message
+            // Clear and type message
             await chatInput.click();
             await new Promise(resolve => setTimeout(resolve, 500));
             
-            // Select all and replace
             await this.page.keyboard.down('Control');
             await this.page.keyboard.press('KeyA');
             await this.page.keyboard.up('Control');
@@ -302,13 +273,12 @@ class OpenRouterAutoLogin {
             await chatInput.type(message);
             await new Promise(resolve => setTimeout(resolve, 1000));
             
-            // Send the message
-            console.log('📨 Sending message...');
+            // Send message
             await this.page.keyboard.press('Enter');
             
-            // Wait for and capture response
-            const response = await this.waitForLoadingAndResponse(initialMessageCount);
-            console.log(`✅ Received response: "${response.substring(0, 100)}${response.length > 100 ? '...' : ''}"`);
+            // Wait for response
+            const response = await this.waitForStableResponse();
+            console.log(`✅ Response received (${response.length} chars)`);
             
             return {
                 success: true,
@@ -325,184 +295,151 @@ class OpenRouterAutoLogin {
         }
     }
 
-    // NEW: Wait for loading animation to disappear, then get complete response  
-    async waitForLoadingAndResponse(initialMessageCount, timeoutMs = 60000) {
-        const startTime = Date.now();
-        console.log('⏳ Waiting for AI response...');
+    // Helper method to find chat input
+    async findChatInput() {
+        // Try different selectors
+        const selectors = [
+            'textarea[name="Chat Input"]',
+            'textarea[placeholder*="Start a message"]',
+            'textarea[placeholder*="message"]'
+        ];
         
-        // Step 1: Wait for loading indicator to appear and then disappear
-        try {
-            // First wait for loading animation to appear
-            await this.page.waitForSelector('.animate-scale-pulse', { timeout: 10000 });
-            console.log('🔄 Loading animation detected, waiting for it to finish...');
-            
-            // Then wait for it to disappear (response is ready)
-            await this.page.waitForFunction(() => {
-                const loadingElements = document.querySelectorAll('.animate-scale-pulse');
-                return loadingElements.length === 0;
-            }, { timeout: timeoutMs });
-            
-            console.log('✅ Loading animation finished!');
-            
-        } catch (e) {
-            console.log('⚠️ Loading animation handling failed, trying direct response detection...');
+        for (const selector of selectors) {
+            try {
+                const input = await this.page.$(selector);
+                if (input) return input;
+            } catch (e) {
+                continue;
+            }
         }
         
-        // Step 2: Wait for response to appear and stabilize
+        // Last resort: find any textarea
+        return await this.page.evaluateHandle(() => {
+            const textareas = document.querySelectorAll('textarea');
+            return textareas.length > 0 ? textareas[0] : null;
+        });
+    }
+
+    // Wait for response to stabilize
+    async waitForStableResponse(timeoutMs = 45000) {
+        console.log('⏳ Waiting for AI response...');
+        
+        try {
+            // Wait for loading animation to appear and disappear
+            await this.page.waitForSelector('.animate-scale-pulse', { timeout: 10000 })
+                .catch(() => console.log('⚠️ No loading animation detected'));
+            
+            await this.page.waitForFunction(() => {
+                return document.querySelectorAll('.animate-scale-pulse').length === 0;
+            }, { timeout: timeoutMs }).catch(() => console.log('⚠️ Loading animation timeout'));
+            
+        } catch (e) {
+            console.log('⚠️ Loading detection failed, proceeding...');
+        }
+        
+        // Wait for response to stabilize
         let lastResponse = '';
         let stableCount = 0;
-        const stabilityThreshold = 1000; // 1 second of stability
-        const pollInterval = 200; // Check every 200ms
-        const requiredStableCycles = Math.ceil(stabilityThreshold / pollInterval); // 5 cycles
+        const requiredStableCycles = 5; // 1 second of stability (5 * 200ms)
+        const startTime = Date.now();
         
-        console.log('📝 Waiting for response to stabilize...');
-        
-        const pollStartTime = Date.now();
-        
-        while (Date.now() - pollStartTime < timeoutMs) {
+        while (Date.now() - startTime < timeoutMs) {
             try {
-                // Get the latest AI response
                 const currentResponse = await this.page.evaluate(() => {
-                    // Find all potential AI response containers
                     const responseSelectors = [
                         'div.max-w-3xl.bg-slate-3',
-                        'div[class*="bg-slate-3"]',
-                        'div.max-w-3xl[class*="bg-slate"]'
+                        'div[class*="bg-slate-3"]'
                     ];
                     
-                    let latestResponse = '';
-                    let latestTimestamp = 0;
+                    let bestResponse = '';
                     
                     for (const selector of responseSelectors) {
                         const elements = document.querySelectorAll(selector);
-                        
                         for (const element of elements) {
-                            // Skip if it contains loading animation
-                            if (element.querySelector('.animate-scale-pulse')) {
-                                continue;
-                            }
+                            if (element.querySelector('.animate-scale-pulse')) continue;
                             
                             const text = element.textContent?.trim() || '';
-                            if (text.length > 10) {
-                                // Use DOM position as a rough timestamp indicator
-                                const rect = element.getBoundingClientRect();
-                                const pseudoTimestamp = rect.top + rect.left;
-                                
-                                if (text.length > latestResponse.length || pseudoTimestamp > latestTimestamp) {
-                                    latestResponse = text;
-                                    latestTimestamp = pseudoTimestamp;
-                                }
+                            if (text.length > bestResponse.length) {
+                                bestResponse = text;
                             }
                         }
                     }
                     
-                    return latestResponse;
+                    return bestResponse;
                 });
                 
                 if (currentResponse && currentResponse.length > 10) {
                     if (currentResponse === lastResponse) {
-                        // Response hasn't changed - increment stability counter
                         stableCount++;
-                        console.log(`📊 Response stable for ${stableCount}/${requiredStableCycles} cycles`);
-                        
                         if (stableCount >= requiredStableCycles) {
-                            console.log('✅ Response fully stabilized!');
+                            console.log('✅ Response stabilized');
                             return currentResponse;
                         }
                     } else {
-                        // Response changed - reset stability counter
-                        console.log(`📝 Response updated: "${currentResponse.substring(0, 50)}${currentResponse.length > 50 ? '...' : ''}"`);
                         lastResponse = currentResponse;
                         stableCount = 0;
                     }
-                } else if (currentResponse) {
-                    // Found response but it's too short, keep waiting
-                    console.log('⏳ Response too short, continuing to wait...');
                 }
                 
             } catch (error) {
-                console.log('⚠️ Error during response detection:', error.message);
+                console.log('⚠️ Response detection error:', error.message);
             }
             
-            // Wait before next check
-            await new Promise(resolve => setTimeout(resolve, pollInterval));
+            await new Promise(resolve => setTimeout(resolve, 200));
         }
         
-        // Timeout fallback
-        if (lastResponse && lastResponse.length > 10) {
-            console.log('⏰ Timeout reached, returning partial response');
-            return lastResponse;
-        }
-        
-        console.log('❌ No response captured within timeout');
-        return 'No response received - please try again';
+        return lastResponse || 'No response received';
     }
 
-    // Get available models
-    async getAvailableModels() {
-        try {
-            const xpath = "//button[contains(., 'Add model')]";
-            const elements = await this.page.$x(xpath);
-            if (elements.length > 0) {
-                await elements[0].click();
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                const models = await this.page.evaluate(() => {
-                    const options = document.querySelectorAll('[cmdk-item], [role="option"]');
-                    return Array.from(options).map(opt => opt.textContent?.trim()).filter(Boolean);
-                });
-                
-                // Close the dialog by pressing Escape
-                await this.page.keyboard.press('Escape');
-                
-                return models;
-            }
-            
-            return [];
-        } catch (error) {
-            return [];
-        }
-    }
-
-    // Initialize the browser and login - FIXED VERSION
+    // Initialize with better error handling and progress logging
     async initialize() {
         try {
+            console.log('🚀 Starting initialization...');
+            
+            // Step 1: Launch browser
             await this.initBrowser();
+            
+            // Step 2: Load existing session
             const sessionLoaded = await this.loadSession();
             
+            // Step 3: Navigate to OpenRouter
+            console.log('📱 Navigating to OpenRouter...');
             await this.page.goto(CONFIG.targetUrl, { 
                 waitUntil: 'networkidle2',
                 timeout: CONFIG.timeout 
             });
-
+            
+            // Step 4: Check if already logged in
             await new Promise(resolve => setTimeout(resolve, 3000));
             const alreadyLoggedIn = await this.isLoggedIn();
-
+            
             if (alreadyLoggedIn) {
-                console.log('✅ Automatic login successful');
+                console.log('✅ Already logged in');
                 await this.saveSession();
-                await this.performPostLoginActions();
-                this.isReady = true;
             } else {
+                console.log('🔐 Login required');
+                
+                // Clear invalid session
                 if (sessionLoaded) {
                     try {
                         await fs.unlink(CONFIG.cookiesFile);
                     } catch (e) {}
                 }
-
+                
                 await this.waitForLogin();
                 await this.saveSession();
-                await this.performPostLoginActions();
-                this.isReady = true;
             }
-
-            await this.startMonitoring();
-            console.log('🚀 OpenRouter API ready!');
+            
+            // Step 5: Post-login setup
+            await this.performPostLoginActions();
+            
+            this.isReady = true;
+            console.log('✅ System ready!');
             
             return true;
             
         } catch (error) {
-            console.error('❌ Error during initialization:', error.message);
+            console.error('❌ Initialization failed:', error.message);
             throw error;
         }
     }
@@ -518,52 +455,35 @@ class OpenRouterAutoLogin {
 
     // Clean shutdown
     async shutdown() {
-        if (this.browser) {
-            await this.browser.close();
-        }
-    }
-
-    // Check session health (only when explicitly called)
-    async checkSession() {
         try {
-            const sessionData = await fs.readFile(CONFIG.cookiesFile, 'utf8');
-            const data = JSON.parse(sessionData);
-            
-            const age = Math.floor((Date.now() - new Date(data.timestamp)) / (1000 * 60 * 60 * 24));
-            const hasAuthCookies = data.cookies.some(c => 
-                c.name.includes('session') || 
-                c.name.includes('auth') || 
-                c.name.includes('clerk')
-            );
-            
-            console.log('Session Info:');
-            console.log(`  Age: ${age} days`);
-            console.log(`  Cookies: ${data.cookies.length}`);
-            console.log(`  Auth cookies: ${hasAuthCookies ? 'Yes' : 'No'}`);
-            
-            return { age, hasAuthCookies, cookieCount: data.cookies.length };
+            if (this.browser) {
+                await this.browser.close();
+                console.log('👋 Browser closed');
+            }
         } catch (error) {
-            console.log('❌ No session file found');
-            return null;
+            console.log('⚠️ Error during shutdown:', error.message);
         }
     }
 }
 
-// Express server setup
+// Create Express server
 function createServer(openRouter) {
     const app = express();
     
     app.use(cors());
     app.use(express.json());
     
+    // Test endpoint
+    app.get('/test', (req, res) => {
+        res.json({ 
+            message: 'Server is working!',
+            timestamp: new Date().toISOString()
+        });
+    });
+    
     // Status endpoint
     app.get('/status', (req, res) => {
         res.json(openRouter.getStatus());
-    });
-    
-    // Test endpoint
-    app.get('/test', (req, res) => {
-        res.json({ message: 'Server is working!', timestamp: new Date().toISOString() });
     });
     
     // Send message endpoint
@@ -583,126 +503,64 @@ function createServer(openRouter) {
         }
     });
     
-    // Get available models
-    app.get('/models', async (req, res) => {
-        try {
-            const models = await openRouter.getAvailableModels();
-            res.json({ models });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-    
-    // Change model
-    app.post('/model', async (req, res) => {
-        try {
-            const { model } = req.body;
-            
-            if (!model) {
-                return res.status(400).json({ error: 'Model name is required' });
-            }
-            
-            CONFIG.selectedModel = model;
-            res.json({ success: true, message: `Model changed to: ${model}` });
-            
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-    
-    // Debug endpoint to see page content
-    app.get('/debug', async (req, res) => {
-        try {
-            const debugInfo = await openRouter.page.evaluate(() => {
-                return {
-                    url: window.location.href,
-                    messageCount: document.querySelectorAll('.max-w-3xl').length,
-                    textareas: document.querySelectorAll('textarea').length,
-                    lastResponse: window.lastAIResponse,
-                    sampleTexts: Array.from(document.querySelectorAll('p')).slice(0, 5).map(p => p.textContent?.substring(0, 100))
-                };
-            });
-            
-            res.json(debugInfo);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-    
-    // Health check
-    app.get('/health', (req, res) => {
-        res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-    });
-    
     return app;
 }
 
-// Utility functions
-async function clearSession() {
-    try {
-        await fs.unlink(CONFIG.cookiesFile);
-        await fs.rmdir(CONFIG.userDataDir, { recursive: true });
-        console.log('🗑️ Session cleared');
-    } catch (error) {
-        console.log('ℹ️ No session to clear');
-    }
-}
-
-// Main execution - FIXED VERSION
+// Main function with better error handling
 async function main() {
     const openRouter = new OpenRouterAutoLogin();
     
     try {
-        // Initialize OpenRouter (this replaces the old run() method)
-        console.log('🚀 Starting OpenRouter automation...');
+        // Initialize the system
         await openRouter.initialize();
         
-        // Start Express server AFTER initialization is complete
+        // Start the server
         const app = createServer(openRouter);
         const server = app.listen(CONFIG.serverPort, () => {
             console.log(`🌐 Server running on http://localhost:${CONFIG.serverPort}`);
-            console.log('API Endpoints:');
-            console.log(`  GET  /test       - Test connection`);
-            console.log(`  GET  /status     - Check status`);
-            console.log(`  POST /send       - Send message`);
-            console.log(`  GET  /models     - Get available models`);
-            console.log(`  POST /model      - Change model`);
-            console.log(`  GET  /debug      - Debug page content`);
-            console.log(`  GET  /health     - Health check`);
+            console.log('📡 API Endpoints:');
+            console.log(`  GET  /test   - Test connection`);
+            console.log(`  GET  /status - Check status`);
+            console.log(`  POST /send   - Send message`);
         });
         
-        // Graceful shutdown
+        // Handle graceful shutdown
         process.on('SIGINT', async () => {
-            console.log('\n👋 Shutting down...');
+            console.log('\n🔄 Shutting down...');
             server.close();
             await openRouter.shutdown();
             process.exit(0);
         });
         
     } catch (error) {
-        console.error('❌ Failed to start:', error.message);
+        console.error('💥 Failed to start:', error.message);
+        await openRouter.shutdown();
         process.exit(1);
     }
 }
 
-// Handle graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('\n👋 Shutting down...');
-    process.exit(0);
-});
-
-// Handle command line arguments
+// Command line handling
 if (require.main === module) {
     const args = process.argv.slice(2);
-    if (args.includes('--server')) {
-        main();
+    if (args.includes('--server') || args.length === 0) {
+        main().catch(console.error);
     } else if (args.includes('--clear')) {
-        clearSession();
+        // Clear session function
+        (async () => {
+            try {
+                await fs.unlink(CONFIG.cookiesFile);
+                await fs.rmdir(CONFIG.userDataDir, { recursive: true });
+                console.log('🗑️ Session cleared');
+            } catch (error) {
+                console.log('ℹ️ No session to clear');
+            }
+        })();
     } else {
         console.log('Usage:');
-        console.log('  node login-helper.js --server  # Start API server');
-        console.log('  node login-helper.js --clear   # Clear saved session');
+        console.log('  node server.js          # Start server');
+        console.log('  node server.js --server # Start server');
+        console.log('  node server.js --clear  # Clear session');
     }
 }
 
-module.exports = { OpenRouterAutoLogin, createServer, CONFIG };
+module.exports = { OpenRouterAutoLogin, CONFIG };
