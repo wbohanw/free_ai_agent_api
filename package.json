@@ -11,9 +11,15 @@
     "install-deps": "npm install"
   },
   "dependencies": {
-    "puppeteer": "^23.0.0"
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "puppeteer": "^23.11.1"
   },
-  "keywords": ["automation", "openrouter", "chat"],
+  "keywords": [
+    "automation",
+    "openrouter",
+    "chat"
+  ],
   "author": "",
   "license": "MIT"
-} 
+}
